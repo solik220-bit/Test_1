@@ -1,0 +1,294 @@
+"""
+Парсер Reddit (без официального API, через публичные данные)
+Для работы нужно установить: pip install requests beautifulsoup4 pandas
+"""
+
+import requests
+import json
+import time
+import csv
+from datetime import datetime
+from typing import List, Dict, Optional
+import argparse
+
+# Попробуем импортировать BeautifulSoup, но он не обязателен для JSON API
+try:
+    from bs4 import BeautifulSoup
+    HAS_BS4 = True
+except ImportImportError:
+    HAS_BS4 = False
+
+
+class RedditParser:
+    """Парсер Reddit с использованием публичного JSON API"""
+    
+    def __init__(self, user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"):
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': user_agent
+        })
+    
+    def get_subreddit_posts(self, subreddit: str, limit: int = 25, sort: str = 'hot') -> List[Dict]:
+        """
+        Получить посты из сабреддита
+        
+        Args:
+            subreddit: название сабреддита (без r/)
+            limit: количество постов (макс 100)
+            sort: hot, new, top, rising
+        
+        Returns:
+            список постов
+        """
+        # Reddit отдаёт JSON, если добавить .json в конец URL
+        url = f"https://www.reddit.com/r/{subreddit}/{sort}.json?limit={min(limit, 100)}"
+        
+        try:
+            response = self.session.get(url)
+            response.raise_for_status()
+            
+            data = response.json()
+            posts = []
+            
+            for child in data['data']['children']:
+                post_data = child['data']
+                posts.append({
+                    'id': post_data.get('id'),
+                    'title': post_data.get('title'),
+                    'author': post_data.get('author'),
+                    'score': post_data.get('score'),
+                    'upvote_ratio': post_data.get('upvote_ratio'),
+                    'num_comments': post_data.get('num_comments'),
+                    'created_utc': post_data.get('created_utc'),
+                    'created_datetime': datetime.fromtimestamp(post_data.get('created_utc')).strftime('%Y-%m-%d %H:%M:%S'),
+                    'url': post_data.get('url'),
+                    'permalink': f"https://www.reddit.com{post_data.get('permalink')}",
+                    'selftext': post_data.get('selftext', '')[:500],  # ограничим длину
+                    'is_self': post_data.get('is_self'),
+                    'stickied': post_data.get('stickied'),
+                    'over_18': post_data.get('over_18')
+                })
+            
+            return posts
+            
+        except requests.RequestException as e:
+            print(f"Ошибка при запросе: {e}")
+            return []
+    
+    def get_post_comments(self, post_url: str, limit: int = 50) -> List[Dict]:
+        """
+        Получить комментарии к посту
+        
+        Args:
+            post_url: полный URL поста
+            limit: количество комментариев
+        
+        Returns:
+            список комментариев
+        """
+        # Добавляем .json к URL поста
+        if post_url.endswith('/'):
+            json_url = f"{post_url}.json"
+        else:
+            json_url = f"{post_url}.json"
+        
+        try:
+            response = self.session.get(json_url)
+            response.raise_for_status()
+            
+            data = response.json()
+            comments = []
+            
+            # Структура: [пост, {комментарии}]
+            if len(data) >= 2:
+                comments_data = data[1]['data']['children']
+                
+                for child in comments_data[:limit]:
+                    if 'data' in child:
+                        comment_data = child['data']
+                        comments.append({
+                            'id': comment_data.get('id'),
+                            'author': comment_data.get('author'),
+                            'body': comment_data.get('body', '')[:500],
+                            'score': comment_data.get('score'),
+                            'created_utc': comment_data.get('created_utc'),
+                            'created_datetime': datetime.fromtimestamp(comment_data.get('created_utc')).strftime('%Y-%m-%d %H:%M:%S'),
+                            'parent_id': comment_data.get('parent_id'),
+                            'permalink': f"https://www.reddit.com{comment_data.get('permalink')}"
+                        })
+            
+            return comments
+            
+        except requests.RequestException as e:
+            print(f"Ошибка при получении комментариев: {e}")
+            return []
+    
+    def search_posts(self, query: str, limit: int = 25, subreddit: Optional[str] = None) -> List[Dict]:
+        """
+        Поиск постов по ключевым словам
+        
+        Args:
+            query: поисковый запрос
+            limit: количество результатов
+            subreddit: ограничить поиск сабреддитом (опционально)
+        
+        Returns:
+            список найденных постов
+        """
+        if subreddit:
+            url = f"https://www.reddit.com/r/{subreddit}/search.json?q={query}&limit={limit}"
+        else:
+            url = f"https://www.reddit.com/search.json?q={query}&limit={limit}"
+        
+        try:
+            response = self.session.get(url)
+            response.raise_for_status()
+            
+            data = response.json()
+            posts = []
+            
+            for child in data['data']['children']:
+                post_data = child['data']
+                posts.append({
+                    'id': post_data.get('id'),
+                    'title': post_data.get('title'),
+                    'subreddit': post_data.get('subreddit'),
+                    'author': post_data.get('author'),
+                    'score': post_data.get('score'),
+                    'num_comments': post_data.get('num_comments'),
+                    'created_utc': post_data.get('created_utc'),
+                    'created_datetime': datetime.fromtimestamp(post_data.get('created_utc')).strftime('%Y-%m-%d %H:%M:%S'),
+                    'url': post_data.get('url'),
+                    'permalink': f"https://www.reddit.com{post_data.get('permalink')}",
+                    'selftext': post_data.get('selftext', '')[:300]
+                })
+            
+            return posts
+            
+        except requests.RequestException as e:
+            print(f"Ошибка при поиске: {e}")
+            return []
+    
+    def save_to_json(self, data: List[Dict], filename: str):
+        """Сохранить данные в JSON файл"""
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(f"Данные сохранены в {filename}")
+    
+    def save_to_csv(self, data: List[Dict], filename: str):
+        """Сохранить данные в CSV файл"""
+        if not data:
+            print("Нет данных для сохранения")
+            return
+        
+        # Получаем все возможные ключи из всех словарей
+        keys = set()
+        for item in data:
+            keys.update(item.keys())
+        keys = sorted(keys)
+        
+        with open(filename, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=keys)
+            writer.writeheader()
+            writer.writerows(data)
+        
+        print(f"Данные сохранены в {filename}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Парсер Reddit')
+    parser.add_argument('--subreddit', '-s', type=str, help='Название сабреддита')
+    parser.add_argument('--limit', '-l', type=int, default=25, help='Количество постов (макс 100)')
+    parser.add_argument('--sort', '-o', type=str, default='hot', choices=['hot', 'new', 'top', 'rising'], help='Сортировка')
+    parser.add_argument('--search', '-q', type=str, help='Поисковый запрос')
+    parser.add_argument('--comments', '-c', action='store_true', help='Собрать комментарии к первому посту')
+    parser.add_argument('--format', '-f', type=str, default='json', choices=['json', 'csv'], help='Формат вывода')
+    parser.add_argument('--output', '-out', type=str, default='reddit_data', help='Имя выходного файла (без расширения)')
+    
+    args = parser.parse_args()
+    
+    reddit = RedditParser()
+    
+    # Если указан поиск
+    if args.search:
+        print(f"Поиск по запросу: '{args.search}'")
+        if args.subreddit:
+            print(f"в сабреддите: r/{args.subreddit}")
+        
+        posts = reddit.search_posts(args.search, args.limit, args.subreddit)
+        
+        if posts:
+            print(f"\nНайдено постов: {len(posts)}")
+            for i, post in enumerate(posts[:5], 1):
+                print(f"{i}. {post['title'][:80]}... (r/{post.get('subreddit', '?')}, +{post['score']})")
+            
+            if args.format == 'json':
+                reddit.save_to_json(posts, f"{args.output}_search.json")
+            else:
+                reddit.save_to_csv(posts, f"{args.output}_search.csv")
+        else:
+            print("Постов не найдено")
+    
+    # Если указан сабреддит
+    elif args.subreddit:
+        print(f"Парсинг сабреддита: r/{args.subreddit} (sort: {args.sort}, limit: {args.limit})")
+        posts = reddit.get_subreddit_posts(args.subreddit, args.limit, args.sort)
+        
+        if posts:
+            print(f"\nПолучено постов: {len(posts)}")
+            for i, post in enumerate(posts[:5], 1):
+                print(f"{i}. {post['title'][:80]}... (автор: {post['author']}, +{post['score']})")
+            
+            # Сохраняем посты
+            if args.format == 'json':
+                reddit.save_to_json(posts, f"{args.output}_posts.json")
+            else:
+                reddit.save_to_csv(posts, f"{args.output}_posts.csv")
+            
+            # Если нужны комментарии к первому посту
+            if args.comments and posts:
+                print(f"\nСбор комментариев к первому посту...")
+                first_post_url = posts[0]['permalink']
+                comments = reddit.get_post_comments(first_post_url, limit=30)
+                
+                if comments:
+                    print(f"Получено комментариев: {len(comments)}")
+                    for comment in comments[:3]:
+                        print(f"  - {comment['author']}: {comment['body'][:60]}...")
+                    
+                    if args.format == 'json':
+                        reddit.save_to_json(comments, f"{args.output}_comments.json")
+                    else:
+                        reddit.save_to_csv(comments, f"{args.output}_comments.csv")
+                else:
+                    print("Комментариев не найдено")
+        else:
+            print("Постов не найдено. Возможно, сабреддит не существует или доступ закрыт.")
+    
+    else:
+        print("""
+Примеры использования:
+======================
+
+1. Получить 10 горячих постов из r/python:
+   python reddit_parser.py --subreddit python --limit 10
+
+2. Получить новые посты из r/memes и сохранить в CSV:
+   python reddit_parser.py --subreddit memes --sort new --format csv --output memes_data
+
+3. Найти посты по слову "machine learning":
+   python reddit_parser.py --search "machine learning" --limit 20
+
+4. Найти посты в r/datascience по слову "pandas":
+   python reddit_parser.py --subreddit datascience --search "pandas" --limit 15
+
+5. Получить посты И комментарии к первому:
+   python reddit_parser.py --subreddit python --limit 5 --comments
+
+6. Сохранить результат в JSON (по умолчанию):
+   python reddit_parser.py --subrediment funny --limit 30 --output funny_posts
+""")
+
+
+if __name__ == "__main__":
+    main()
