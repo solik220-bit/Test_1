@@ -1,1 +1,1 @@
-print('you lost')
+print("you lost")
